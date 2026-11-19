@@ -28,3 +28,6 @@ GitHub Pages hosts the static review tool only. Browser JavaScript cannot reliab
 - Public website retrieval is bounded (timeout + small landing-page read), and searches are paced. Observe website access restrictions.
 - The entire list isn't processed in a background job: research runs when the local app is open and the batch is started.
 - CSV/XLSX and results stay on your PC; local_data is gitignored.
+
+### Automatic multi-engine domain finding
+The local Streamlit app now tries DuckDuckGo, Bing and Google backends through the unofficial `ddgs` library, with a public Bing RSS fallback when possible. Results are checked against company homepage text. In the local interface choose **Find domains automatically** and a batch size up to 1500 to attempt the full imported list. Keep the local app process running. Results are saved after each company. Providers may rate-limit queries; don't assume every company will resolve. Existing data from the GitHub Pages site is separate and is not automatically imported into local SQLite.
