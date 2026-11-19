@@ -7,7 +7,7 @@ from scraper import connect, lookup
 
 st.set_page_config(page_title="BWC Domain Finder — Research", page_icon="🔎", layout="wide")
 st.title("BWC Domain Finder — Automated Research")
-st.caption("Free DuckDuckGo-based discovery + homepage evidence. Results are suggestions, not verified ownership. Runs locally; no paid API key.")
+st.caption("Free multi-engine discovery (DuckDuckGo, Bing, Google via unofficial ddgs; Bing RSS fallback) + homepage evidence. Results are suggestions, not verified ownership. Runs locally; no paid API key.")
 cx = connect()
 
 uploaded = st.file_uploader("Upload CSV or XLSX with company names", type=["csv", "xlsx"])
@@ -41,12 +41,12 @@ m2.metric("Results saved", len(rows))
 m3.metric("Domains suggested", int((rows["domain"].fillna("") != "").sum()) if not rows.empty else 0)
 
 with st.expander("Search settings", expanded=True):
-    batch = st.select_slider("Companies per run", options=[5, 10, 25, 50, 100], value=10)
+    batch = st.select_slider("Companies per run", options=[5, 10, 25, 50, 100, 250, 500, 1500], value=10)
     pause = st.slider("Delay between search requests (seconds)", 1.5, 8.0, 3.0, 0.5)
     retry_unmatched = st.checkbox("Retry researched companies without a domain", value=False)
-    st.info("Large batches may hit public search limits. Run 5–25 first. Existing results are saved immediately and can be resumed.")
+    st.info("For unattended processing, select 1500 and keep this local app running. Search providers may rate-limit or block automated queries; a successful lookup is not guaranteed. Progress is saved after every company. Start with 5–10 to confirm searching works.")
 
-if st.button("Start research", type="primary", disabled=not bool(companies)):
+if st.button("Find domains automatically", type="primary", disabled=not bool(companies)):
     done = set(rows["company"].tolist()) if not rows.empty else set()
     previous = {str(r.company): str(r.domain or "") for r in rows.itertuples(index=False)}
     pending = [(company, country) for company, country in companies
@@ -92,10 +92,10 @@ if not rows.empty:
         st.success("Review changes saved.")
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        edited.to_excel(writer, index=False, sheet_name="Domains")
+        rows.to_excel(writer, index=False, sheet_name="Domains")
     st.download_button("Download Excel", output.getvalue(), file_name="bwc_company_domains.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    st.download_button("Download CSV", edited.to_csv(index=False).encode("utf-8-sig"),
+    st.download_button("Download CSV", rows.to_csv(index=False).encode("utf-8-sig"),
                        file_name="bwc_company_domains.csv", mime="text/csv")
 else:
     st.info("Import a CSV/XLSX and run your first batch to see domain candidates here.")
