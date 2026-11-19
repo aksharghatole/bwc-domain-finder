@@ -26,7 +26,25 @@ $('sample').onclick=()=>{data=['Siemens Energy','Festo','Bosch Rexroth','Unknown
 // Both Wikipedia and Wikidata map to structured Wikidata P856 official-website statements.
 async function api(base,params){let u=base+'?'+new URLSearchParams({...params,format:'json',origin:'*'});let response=await fetch(u);if(!response.ok)throw Error('HTTP '+response.status);let j=await response.json();if(j.error)throw Error(j.error.info||'API error');return j}
 function variants(name){let clean=String(name||'').replace(/\s+/g,' ').trim(),short=clean.replace(/\b(gmbh|co\.?\s*ltd\.?|ltd\.?|inc\.?|llc|ag|srl|private limited|pvt\.? ltd\.?)\b/gi,' ').replace(/\s+/g,' ').trim();return [...new Set([clean,short])].filter(x=>x.length>2)}
-function scoreCandidate(input,entity,country){let labels=[...Object.values(entity.labels||{}).map(x=>x.value),...Object.values(entity.aliases||{}).flatMap(x=>x.map(y=>y.value))];let sim=Math.max(0,...labels.map(x=>similarity(input,x)));let desc=Object.values(entity.descriptions||{}).map(x=>x.value).join(' ').toLowerCase();let negative=/disambiguation|surname|given name|fictional character|village|municipality|footballer/.test(desc);let score=Math.round(35+sim*55-(negative?35:0));if(country){let c=country.toLowerCase();if(desc.includes(c))score+=5}return {score:Math.min(95,Math.max(0,score)),sim,label:entity.labels?.en?.value||labels[0]||''}}
+function legalTokens(x){return norm(x).split(' ').filter(t=>t&&!new Set(['gmbh','ag','ltd','limited','inc','corporation','corp','co','company','srl','bv','se','ug','mbh','and','the','of','group','technologies','technology']).has(t))}
+function scoreCandidate(input,entity,country){
+ let labels=[...Object.values(entity.labels||{}).map(x=>x.value),...Object.values(entity.aliases||{}).flatMap(x=>x.map(y=>y.value))];
+ let desc=Object.values(entity.descriptions||{}).map(x=>x.value).join(' ').toLowerCase();
+ let negative=/disambiguation|surname|given name|fictional character|village|municipality|footballer/.test(desc);
+ let inputTokens=legalTokens(input),best={sim:0,precision:0,extra:99,label:''};
+ for(let label of labels){
+  let tokens=legalTokens(label),sim=similarity(input,label);
+  let common=inputTokens.filter(t=>tokens.includes(t)).length;
+  let precision=common/Math.max(1,inputTokens.length);
+  let extra=tokens.filter(t=>!inputTokens.includes(t)).length;
+  if(sim>best.sim||(sim===best.sim&&extra<best.extra))best={sim,precision,extra,label}
+ }
+ // A broad match such as "AGRO AG" must not become "Danish Agro".
+ if(negative||best.sim<.70||best.precision<.80||best.extra>0)return {score:0,sim:best.sim,label:best.label,accepted:false};
+ let score=Math.round(55+best.sim*35);
+ if(country&&desc.includes(country.toLowerCase()))score+=3;
+ return {score:Math.min(95,score),sim:best.sim,label:best.label,accepted:true}
+}
 async function lookup(name,country=''){
  const candidates=new Map(),queries=variants(name),issues=[];
  // Entity searches in English and German; limit network calls for public API fairness.
@@ -42,7 +60,7 @@ async function lookup(name,country=''){
  for(let entity of Object.values(j.entities||{})){
  let site=entity.claims?.P856?.find(x=>x.mainsnak?.datavalue?.value)?.mainsnak?.datavalue?.value;
  let domain=domainOf(site);if(!domain)continue;
- let rank=scoreCandidate(name,entity,country);if(rank.sim<.46)continue;
+ let rank=scoreCandidate(name,entity,country);if(!rank.accepted)continue;
  matches.push({domain,confidence:rank.score,evidence:'https://www.wikidata.org/wiki/'+entity.id,matchLabel:rank.label,score:rank.score,source:'Wikidata P856 (via Wikidata/Wikipedia)'})
  }
  matches.sort((x,y)=>y.score-x.score);
