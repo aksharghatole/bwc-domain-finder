@@ -4,6 +4,8 @@ import time
 import sqlite3
 import random
 import ipaddress
+import math
+from email.utils import parsedate_to_datetime
 from datetime import datetime, timezone
 from urllib.parse import urlparse, urljoin
 from xml.etree import ElementTree as ET
@@ -30,6 +32,53 @@ LEGAL = {
     "corp", "corporation", "llc", "bv", "srl", "sa", "pvt",
     "private", "plc", "kg", "and", "the", "of",
 }
+
+
+# Process-local provider cooldowns. Bing RSS shares Bing's cooldown.
+PROVIDERS = ("duckduckgo", "bing", "google", "wikidata")
+_PROVIDER_UNTIL = {}
+
+
+def provider_wait(provider):
+    return max(0, math.ceil(_PROVIDER_UNTIL.get(provider, 0) - time.monotonic()))
+
+
+def all_providers_wait():
+    return min(provider_wait(provider) for provider in PROVIDERS)
+
+
+def cooldown_after_error(provider, exc):
+    """Honor explicit throttling and temporary service failures without bypassing them."""
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    message = (type(exc).__name__ + " " + str(exc)).lower()
+    throttled = status in (403, 429) or any(
+        phrase in message for phrase in ("ratelimit", "rate limit", "too many requests", "captcha", "429")
+    )
+    temporary = status == 503 or isinstance(exc, requests.Timeout)
+    if not (throttled or temporary):
+        return 0
+    seconds = 300 if throttled else 60
+    retry_after = response.headers.get("Retry-After") if response is not None else None
+    if retry_after:
+        try:
+            seconds = max(seconds, int(retry_after))
+        except (ValueError, TypeError):
+            try:
+                seconds = max(seconds, math.ceil((parsedate_to_datetime(retry_after)
+                                                  - datetime.now(timezone.utc)).total_seconds()))
+            except (ValueError, TypeError, OverflowError):
+                pass
+    _PROVIDER_UNTIL[provider] = max(_PROVIDER_UNTIL.get(provider, 0),
+                                    time.monotonic() + seconds)
+    return provider_wait(provider)
+
+
+def provider_error(provider, exc):
+    wait = cooldown_after_error(provider, exc)
+    return f"{provider}: {type(exc).__name__} {str(exc)[:80]}" + (
+        f" (cooldown {wait}s)" if wait else ""
+    )
 
 
 def _create_results(cx):
@@ -136,6 +185,8 @@ def discover_search(company, country="", max_results=6, pause=2.0):
     candidates, errors = {}, []
     for query in queries[:2]:
         for backend in ("duckduckgo", "bing", "google"):
+            if provider_wait(backend):
+                continue
             try:
                 with DDGS(timeout=15) as client:
                     results = list(client.text(query, backend=backend, max_results=max_results))
@@ -150,11 +201,11 @@ def discover_search(company, country="", max_results=6, pause=2.0):
                 if len(candidates) >= max_results:
                     return candidates, errors
             except Exception as exc:
-                errors.append(f"{backend}: {type(exc).__name__} {str(exc)[:80]}")
+                errors.append(provider_error(backend, exc))
             time.sleep(pause + random.uniform(0, 0.5))
         # Unofficial libraries change; Bing RSS offers a second public discovery path,
         # subject to availability and service access rules.
-        if len(candidates) < max_results:
+        if len(candidates) < max_results and not provider_wait("bing"):
             try:
                 resp = requests.get("https://www.bing.com/search",
                                     params={"q": query, "format": "rss"},
@@ -172,13 +223,18 @@ def discover_search(company, country="", max_results=6, pause=2.0):
                         "search_source": "bing-rss",
                     })
             except Exception as exc:
-                errors.append(f"bing-rss: {type(exc).__name__} {str(exc)[:80]}")
+                errors.append("RSS " + provider_error("bing", exc))
             time.sleep(pause)
+    for provider in ("duckduckgo", "bing", "google"):
+        if provider_wait(provider) and not any(provider in err for err in errors):
+            errors.append(f"{provider}: cooldown {provider_wait(provider)}s")
     return candidates, errors
 
 
 def discover_wikidata(company, max_results=4):
     """Retrieve official-website (P856) candidates for closely named entities."""
+    if provider_wait("wikidata"):
+        return {}, [f"wikidata: cooldown {provider_wait('wikidata')}s"]
     endpoint = "https://www.wikidata.org/w/api.php"
     candidates = {}
     errors = []
@@ -223,7 +279,7 @@ def discover_wikidata(company, max_results=4):
                 if len(candidates) >= max_results:
                     return candidates, errors
     except (requests.RequestException, ValueError, TypeError, AttributeError) as exc:
-        errors.append(f"wikidata: {type(exc).__name__} {str(exc)[:80]}")
+        errors.append(provider_error("wikidata", exc))
     return candidates, errors
 
 
