@@ -3,8 +3,9 @@ import re
 import time
 import sqlite3
 import random
+import ipaddress
 from datetime import datetime, timezone
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 from xml.etree import ElementTree as ET
 from pathlib import Path
 
@@ -78,13 +79,31 @@ def tokens(name):
 
 
 def domain_from(url):
+    """Accept only HTTP(S) public-looking DNS hostnames, not IP literals."""
     try:
+        if not isinstance(url, str) or not url.strip():
+            return ""
+        url = url.strip()
         p = urlparse(url if "://" in url else "https://" + url)
-        hostname = (p.hostname or "").lower().removeprefix("www.")
-        if not hostname or "." not in hostname or any(hostname == x or hostname.endswith("." + x) for x in EXCLUDE):
+        if p.scheme not in ("http", "https") or p.username is not None or p.password is not None:
+            return ""
+        if p.port not in (None, 80, 443):
+            return ""
+        hostname = (p.hostname or "").rstrip(".").lower().encode("idna").decode("ascii")
+        hostname = hostname.removeprefix("www.")
+        try:
+            ipaddress.ip_address(hostname)
+            return ""
+        except ValueError:
+            pass
+        labels = hostname.split(".")
+        if (len(labels) < 2 or len(hostname) > 253 or not labels[-1][0:1].isalpha()
+                or any(not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) for label in labels)
+                or labels[-1] in {"local", "localhost", "internal", "lan", "home"}
+                or any(hostname == x or hostname.endswith("." + x) for x in EXCLUDE)):
             return ""
         return hostname
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, UnicodeError):
         return ""
 
 
@@ -209,19 +228,40 @@ def discover_wikidata(company, max_results=4):
 
 
 def site_evidence(url):
-    """Inspect only one landing page. Do not bypass access restrictions."""
+    """Read bounded HTML and follow only redirects within the candidate hostname."""
+    original = domain_from(url)
+    if not original or not url.startswith(("http://", "https://")):
+        return "", "", "Invalid candidate URL", ""
+    current = url
     try:
-        response = requests.get(url, headers=HEADERS, timeout=(5, 12), allow_redirects=True)
-        if response.status_code != 200 or "text/html" not in response.headers.get("content-type", "").lower():
-            return "", "", "Site unavailable or non-HTML"
-        soup = BeautifulSoup(response.text[:300000], "html.parser")
-        title = soup.title.get_text(" ", strip=True) if soup.title else ""
-        meta = soup.find("meta", attrs={"name": re.compile("^description$", re.I)})
-        desc = meta.get("content", "") if meta else ""
-        h1 = " ".join(x.get_text(" ", strip=True) for x in soup.find_all("h1", limit=2))
-        return title[:250], (title + " " + desc + " " + h1)[:1200], ""
-    except requests.RequestException as e:
-        return "", "", type(e).__name__
+        for _ in range(5):
+            with requests.get(current, headers=HEADERS, timeout=(5, 12),
+                              allow_redirects=False, stream=True) as response:
+                if response.status_code in (301, 302, 303, 307, 308):
+                    location = response.headers.get("Location")
+                    if not location:
+                        return "", "", "Redirect missing location", current
+                    target = urljoin(current, location)
+                    if not target.startswith(("http://", "https://")) or domain_from(target) != original:
+                        return "", "", "Cross-host or excluded redirect; manual review required", current
+                    current = target
+                    continue
+                if response.status_code != 200 or "text/html" not in response.headers.get("content-type", "").lower():
+                    return "", "", "Site unavailable or non-HTML", current
+                chunks = bytearray()
+                for chunk in response.iter_content(chunk_size=16384):
+                    chunks.extend(chunk[:300000 - len(chunks)])
+                    if len(chunks) >= 300000:
+                        break
+                soup = BeautifulSoup(bytes(chunks), "html.parser")
+                title = soup.title.get_text(" ", strip=True) if soup.title else ""
+                meta = soup.find("meta", attrs={"name": re.compile("^description$", re.I)})
+                desc = meta.get("content", "") if meta else ""
+                h1 = " ".join(x.get_text(" ", strip=True) for x in soup.find_all("h1", limit=2))
+                return title[:250], (title + " " + desc + " " + h1)[:1200], "", current
+        return "", "", "Redirect limit exceeded", current
+    except (requests.RequestException, ValueError) as e:
+        return "", "", type(e).__name__, current
 
 
 def lookup(company, country="", max_results=6, pause=2.0):
@@ -234,9 +274,12 @@ def lookup(company, country="", max_results=6, pause=2.0):
         structured.setdefault(dom, candidate)
     candidates = structured
     scored = []
+    site_errors = []
     for dom, result in list(candidates.items())[:max_results + 4]:
         url = result.get("href", "")
-        title, evidence, err = site_evidence(url)
+        title, evidence, err, final_url = site_evidence(url)
+        if err:
+            site_errors.append(f"{dom}: {err}")
         search_title = result.get("title", "")
         search_snippet = result.get("body", "")
         # Titles often contain an exact brand followed by a marketing tagline.
@@ -258,7 +301,7 @@ def lookup(company, country="", max_results=6, pause=2.0):
             confidence = min(confidence, 32)
         scored.append({
             "domain": dom, "confidence": confidence,
-            "evidence_url": url, "evidence_title": title or search_title,
+            "evidence_url": final_url or url, "evidence_title": title or search_title,
             "matched_name": search_title,
             "notes": f"Search: {result.get('search_source', 'unknown')}. "
                      + (err or "Compared website title, meta description and headings")
@@ -272,7 +315,7 @@ def lookup(company, country="", max_results=6, pause=2.0):
             "domain": "", "confidence": 0, "evidence_url": "",
             "evidence_title": "", "matched_name": "",
             "status": "review",
-            "notes": "No defensible domain match. " + "; ".join(errors[:3]),
+            "notes": "No defensible domain match. " + "; ".join((site_errors + errors)[:3]),
         }
     best = scored[0]
     if len(scored) > 1 and best["confidence"] - scored[1]["confidence"] < 10:
@@ -281,6 +324,8 @@ def lookup(company, country="", max_results=6, pause=2.0):
     best["status"] = "review"
     if errors:
         best["notes"] += "; some search sources unavailable: " + "; ".join(errors[:2])
+    if site_errors:
+        best["notes"] += "; some candidate sites unavailable: " + "; ".join(site_errors[:2])
     return best
 
 

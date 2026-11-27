@@ -43,3 +43,7 @@ Country is included in the review table and CSV/XLSX exports. Automated retries 
 ### Local Wikidata discovery
 
 The local Python scraper also queries Wikidata's public entity API for official website (P856) claims with closely matching names. These are additional candidates, not proof of ownership: the app still evaluates homepage evidence and flags competing domains. Entity links are recorded in notes. The structured lookup uses English labels and aliases, does not independently verify country, and may miss small companies or fail under provider throttling. Keep batch sizes modest and manually review results.
+
+### Homepage redirect validation
+
+The local scraper now follows at most four redirects before reading the final response and only accepts redirects that retain the original hostname (a leading www. is ignored). Cross-host redirects, non-HTTP(S) URLs, IP literals and invalid hostnames are rejected. This deliberately leaves some legitimate company rebrands or alternate-domain redirects for manual review. Homepage downloads are streamed and limited to 300,000 bytes of HTML; successful evidence records the final URL. These checks are not a guarantee that a hostname resolves to a public IP address or that the website belongs to the company.
