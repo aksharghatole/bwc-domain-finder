@@ -8,6 +8,62 @@ import scraper
 
 
 class DomainFinderTests(unittest.TestCase):
+    def setUp(self):
+        cooldowns = patch.object(scraper, '_PROVIDER_UNTIL', {})
+        cooldowns.start()
+        self.addCleanup(cooldowns.stop)
+
+    def test_retry_after_and_expiry(self):
+        response = scraper.requests.Response()
+        response.status_code = 429
+        response.headers["Retry-After"] = "900"
+        error = scraper.requests.HTTPError("Too Many Requests", response=response)
+        with patch.object(scraper.time, "monotonic", return_value=100):
+            self.assertEqual(scraper.cooldown_after_error("bing", error), 900)
+        with patch.object(scraper.time, "monotonic", return_value=999):
+            self.assertEqual(scraper.provider_wait("bing"), 1)
+        with patch.object(scraper.time, "monotonic", return_value=1000):
+            self.assertEqual(scraper.provider_wait("bing"), 0)
+
+    def test_bing_throttling_skips_rss_and_other_queries(self):
+        response = scraper.requests.Response()
+        response.status_code = 429
+        error = scraper.requests.HTTPError("Too Many Requests", response=response)
+        with patch.object(scraper.time, "monotonic", return_value=100), \
+             patch.object(scraper.time, "sleep"), \
+             patch.object(scraper, "DDGS") as ddgs, \
+             patch.object(scraper.requests, "get") as rss:
+            client = ddgs.return_value.__enter__.return_value
+            def search(*args, **kwargs):
+                if kwargs["backend"] == "bing":
+                    raise error
+                return []
+            client.text.side_effect = search
+            _, errors = scraper.discover_search("Acme GmbH")
+            backends = [call.kwargs["backend"] for call in client.text.call_args_list]
+            self.assertEqual(backends.count("bing"), 1)
+            self.assertIn("google", backends)
+            self.assertIn("duckduckgo", backends)
+            rss.assert_not_called()
+            self.assertTrue(any("cooldown" in message for message in errors))
+
+    def test_all_provider_wait_tracks_earliest_recovery(self):
+        with patch.object(scraper.time, "monotonic", return_value=100):
+            scraper._PROVIDER_UNTIL.update({p: 400 for p in scraper.PROVIDERS})
+            scraper._PROVIDER_UNTIL["wikidata"] = 160
+            self.assertEqual(scraper.all_providers_wait(), 60)
+            scraper._PROVIDER_UNTIL["google"] = 99
+            self.assertEqual(scraper.all_providers_wait(), 0)
+
+    def test_wikidata_skips_requests_during_cooldown(self):
+        with patch.object(scraper.time, "monotonic", return_value=100), \
+             patch.object(scraper.requests, "get") as get:
+            scraper._PROVIDER_UNTIL["wikidata"] = 160
+            candidates, errors = scraper.discover_wikidata("Acme")
+            self.assertEqual(candidates, {})
+            self.assertIn("cooldown 60s", errors[0])
+            get.assert_not_called()
+
     def test_domain_parsing(self):
         self.assertEqual(scraper.domain_from("https://www.example.com/about"), "example.com")
         self.assertEqual(scraper.domain_from("https://uk.linkedin.com/company/a"), "")
