@@ -86,7 +86,7 @@ def name_fit(company, text):
 def discover_search(company, country="", max_results=6, pause=2.0):
     """Try different public search backends with explicit failure reporting."""
     short = " ".join(tokens(company))
-    queries = [f'"{company}" official website']
+    queries = [f'"{company}" {country} official website'.strip()]
     if short and normalize(short) != normalize(company):
         queries.append(f'"{short}" {country} company website'.strip())
     candidates, errors = {}, []
@@ -198,6 +198,22 @@ def lookup(company, country="", max_results=6, pause=2.0):
     return best
 
 
+def eligible_companies(companies, saved_rows, retry_unmatched=False):
+    """Keep manually approved or rejected results out of automated retries."""
+    saved = {row["company"]: row for row in saved_rows}
+    pending = []
+    seen = set()
+    for company, country in companies:
+        if company in seen:
+            continue
+        seen.add(company)
+        row = saved.get(company)
+        if row is None or (retry_unmatched and not row.get("domain")
+                           and row.get("status") not in {"approved", "rejected"}):
+            pending.append((company, country))
+    return pending
+
+
 def write_result(cx, company, result):
     cx.execute("""INSERT INTO results(company, domain, confidence, evidence_url, evidence_title,
             matched_name, status, notes, checked_at) VALUES (?,?,?,?,?,?,?,?,?)
@@ -205,7 +221,8 @@ def write_result(cx, company, result):
             domain=excluded.domain, confidence=excluded.confidence,
             evidence_url=excluded.evidence_url, evidence_title=excluded.evidence_title,
             matched_name=excluded.matched_name, status=excluded.status,
-            notes=excluded.notes, checked_at=excluded.checked_at""",
+            notes=excluded.notes, checked_at=excluded.checked_at
+        WHERE COALESCE(results.status, '') NOT IN ('approved', 'rejected')""",
         (company, result.get("domain", ""), result.get("confidence", 0),
          result.get("evidence_url", ""), result.get("evidence_title", ""),
          result.get("matched_name", ""), result.get("status", "review"),

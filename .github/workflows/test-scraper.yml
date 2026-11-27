@@ -2,12 +2,11 @@ name: Test local scraper
 on:
   push:
     branches: [main]
-    paths:
-      - "scraper.py"
-      - "research_app.py"
-      - "requirements.txt"
-      - ".github/workflows/test-scraper.yml"
+  pull_request:
+    branches: [main]
   workflow_dispatch:
+permissions:
+  contents: read
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -18,4 +17,4 @@ jobs:
           python-version: "3.11"
       - run: python -m pip install -r requirements.txt
       - run: python -m py_compile scraper.py research_app.py
-      - run: python -c "from scraper import normalize, domain_from, name_fit; assert domain_from('https://example.com/about') == 'example.com'; assert name_fit('AGRO AG', 'Danish Agro') < 0.9"
+      - run: python -m unittest discover -s tests -v
