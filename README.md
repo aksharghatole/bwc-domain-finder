@@ -47,3 +47,9 @@ The local Python scraper also queries Wikidata's public entity API for official 
 ### Homepage redirect validation
 
 The local scraper now follows at most four redirects before reading the final response and only accepts redirects that retain the original hostname (a leading www. is ignored). Cross-host redirects, non-HTTP(S) URLs, IP literals and invalid hostnames are rejected. This deliberately leaves some legitimate company rebrands or alternate-domain redirects for manual review. Homepage downloads are streamed and limited to 300,000 bytes of HTML; successful evidence records the final URL. These checks are not a guarantee that a hostname resolves to a public IP address or that the website belongs to the company.
+
+### Search-provider cooldowns
+
+The local app temporarily skips providers reporting throttling (including HTTP 429/403 or explicit CAPTCHA/rate-limit errors) for at least five minutes, and applies a one-minute cooldown for timeouts or HTTP 503. A longer HTTP Retry-After instruction takes precedence. Bing and Bing RSS share a cooldown; the app does not use RSS to circumvent a Bing limit.
+
+When all providers are cooling down, the batch stops, saves completed results and leaves unfinished companies eligible for a later run. The interface shows the cooldown and the earliest available retry time. Restarting the local Python process clears these in-memory cooldowns; do not restart to circumvent provider restrictions. This is not a guarantee that every upstream provider exposes its throttling signal through ddgs.
