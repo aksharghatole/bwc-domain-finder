@@ -31,16 +31,41 @@ LEGAL = {
 }
 
 
-def connect():
-    cx = sqlite3.connect(DB)
+def _create_results(cx):
     cx.execute("""CREATE TABLE IF NOT EXISTS results(
-        company TEXT PRIMARY KEY, domain TEXT, confidence INTEGER DEFAULT 0,
+        company TEXT NOT NULL, country TEXT NOT NULL DEFAULT '',
+        domain TEXT, confidence INTEGER DEFAULT 0,
         evidence_url TEXT, evidence_title TEXT, matched_name TEXT,
         status TEXT DEFAULT 'pending', notes TEXT DEFAULT '',
-        checked_at TEXT
+        checked_at TEXT, PRIMARY KEY(company, country)
     )""")
-    cx.commit()
-    return cx
+
+
+def connect():
+    cx = sqlite3.connect(DB, timeout=30)
+    try:
+        # Serialize schema changes and roll back the entire migration on error.
+        with cx:
+            cx.execute("BEGIN IMMEDIATE")
+            columns = {row[1] for row in cx.execute("PRAGMA table_info(results)")}
+            if columns and "country" not in columns:
+                cx.execute("ALTER TABLE results RENAME TO results_legacy")
+                _create_results(cx)
+                cx.execute("""INSERT INTO results(company, country, domain, confidence,
+                    evidence_url, evidence_title, matched_name, status, notes, checked_at)
+                    SELECT company, '', domain, confidence, evidence_url, evidence_title,
+                           matched_name, status, notes, checked_at FROM results_legacy""")
+                cx.execute("DROP TABLE results_legacy")
+            else:
+                _create_results(cx)
+        return cx
+    except Exception:
+        cx.close()
+        raise
+
+
+def company_key(company, country=""):
+    return str(company or "").strip(), str(country or "").strip()
 
 
 def normalize(name):
@@ -200,30 +225,34 @@ def lookup(company, country="", max_results=6, pause=2.0):
 
 def eligible_companies(companies, saved_rows, retry_unmatched=False):
     """Keep manually approved or rejected results out of automated retries."""
-    saved = {row["company"]: row for row in saved_rows}
+    saved = {company_key(row["company"], row.get("country", "")): row for row in saved_rows}
     pending = []
     seen = set()
     for company, country in companies:
-        if company in seen:
+        key = company_key(company, country)
+        if not key[0] or key in seen:
             continue
-        seen.add(company)
-        row = saved.get(company)
+        seen.add(key)
+        row = saved.get(key)
         if row is None or (retry_unmatched and not row.get("domain")
                            and row.get("status") not in {"approved", "rejected"}):
-            pending.append((company, country))
+            pending.append(key)
     return pending
 
 
-def write_result(cx, company, result):
-    cx.execute("""INSERT INTO results(company, domain, confidence, evidence_url, evidence_title,
-            matched_name, status, notes, checked_at) VALUES (?,?,?,?,?,?,?,?,?)
-        ON CONFLICT(company) DO UPDATE SET
+def write_result(cx, company, result, country=""):
+    company, country = company_key(company, country)
+    if not company:
+        raise ValueError("Company name is required")
+    cx.execute("""INSERT INTO results(company, country, domain, confidence, evidence_url, evidence_title,
+            matched_name, status, notes, checked_at) VALUES (?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(company, country) DO UPDATE SET
             domain=excluded.domain, confidence=excluded.confidence,
             evidence_url=excluded.evidence_url, evidence_title=excluded.evidence_title,
             matched_name=excluded.matched_name, status=excluded.status,
             notes=excluded.notes, checked_at=excluded.checked_at
         WHERE COALESCE(results.status, '') NOT IN ('approved', 'rejected')""",
-        (company, result.get("domain", ""), result.get("confidence", 0),
+        (company, country, result.get("domain", ""), result.get("confidence", 0),
          result.get("evidence_url", ""), result.get("evidence_title", ""),
          result.get("matched_name", ""), result.get("status", "review"),
          result.get("notes", ""), datetime.now(timezone.utc).isoformat()))
