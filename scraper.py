@@ -87,6 +87,8 @@ def domain_from(url):
         p = urlparse(url if "://" in url else "https://" + url)
         if p.scheme not in ("http", "https") or p.username is not None or p.password is not None:
             return ""
+        if p.port not in (None, 80, 443):
+            return ""
         hostname = (p.hostname or "").rstrip(".").lower().encode("idna").decode("ascii")
         hostname = hostname.removeprefix("www.")
         try:
@@ -258,7 +260,7 @@ def site_evidence(url):
                 h1 = " ".join(x.get_text(" ", strip=True) for x in soup.find_all("h1", limit=2))
                 return title[:250], (title + " " + desc + " " + h1)[:1200], "", current
         return "", "", "Redirect limit exceeded", current
-    except requests.RequestException as e:
+    except (requests.RequestException, ValueError) as e:
         return "", "", type(e).__name__, current
 
 
@@ -272,11 +274,12 @@ def lookup(company, country="", max_results=6, pause=2.0):
         structured.setdefault(dom, candidate)
     candidates = structured
     scored = []
+    site_errors = []
     for dom, result in list(candidates.items())[:max_results + 4]:
         url = result.get("href", "")
         title, evidence, err, final_url = site_evidence(url)
         if err:
-            errors.append(f"{dom}: {err}")
+            site_errors.append(f"{dom}: {err}")
         search_title = result.get("title", "")
         search_snippet = result.get("body", "")
         # Titles often contain an exact brand followed by a marketing tagline.
@@ -312,7 +315,7 @@ def lookup(company, country="", max_results=6, pause=2.0):
             "domain": "", "confidence": 0, "evidence_url": "",
             "evidence_title": "", "matched_name": "",
             "status": "review",
-            "notes": "No defensible domain match. " + "; ".join(errors[:3]),
+            "notes": "No defensible domain match. " + "; ".join((site_errors + errors)[:3]),
         }
     best = scored[0]
     if len(scored) > 1 and best["confidence"] - scored[1]["confidence"] < 10:
@@ -321,6 +324,8 @@ def lookup(company, country="", max_results=6, pause=2.0):
     best["status"] = "review"
     if errors:
         best["notes"] += "; some search sources unavailable: " + "; ".join(errors[:2])
+    if site_errors:
+        best["notes"] += "; some candidate sites unavailable: " + "; ".join(site_errors[:2])
     return best
 
 
