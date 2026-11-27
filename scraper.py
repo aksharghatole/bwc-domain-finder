@@ -239,7 +239,11 @@ def lookup(company, country="", max_results=6, pause=2.0):
         title, evidence, err = site_evidence(url)
         search_title = result.get("title", "")
         search_snippet = result.get("body", "")
-        company_score = name_fit(company, evidence)
+        # Titles often contain an exact brand followed by a marketing tagline.
+        # A title alone is weaker than full-page evidence, so cap its contribution.
+        title_parts = re.split(r"\s+[|–—-]\s+|\s*\|\s*", title)
+        title_score = max((name_fit(company, part) for part in title_parts), default=0)
+        company_score = max(name_fit(company, evidence), min(0.78, title_score))
         search_score = max(name_fit(company, search_title), name_fit(company, search_snippet))
         # Pages may be unrelated despite matching name fragments.
         if company_score >= 0.85:
