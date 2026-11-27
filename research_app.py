@@ -3,7 +3,7 @@ import io
 import sqlite3
 import pandas as pd
 import streamlit as st
-from scraper import connect, lookup
+from scraper import connect, lookup, eligible_companies, write_result
 
 st.set_page_config(page_title="BWC Domain Finder — Research", page_icon="🔎", layout="wide")
 st.title("BWC Domain Finder — Automated Research")
@@ -27,8 +27,13 @@ if uploaded is not None:
                     if name and name.lower() != "nan":
                         country = str(row.get(country_col, "")).strip() if country_col != "None" else ""
                         records.append((name, country if country.lower() != "nan" else ""))
-                st.session_state["companies"] = list(dict.fromkeys(records))
-                st.success(f"Loaded {len(st.session_state['companies'])} unique company/country pairs.")
+                unique = {}
+                for name, country in records:
+                    unique.setdefault(name, (name, country))
+                st.session_state["companies"] = list(unique.values())
+                if len(unique) < len(set(records)):
+                    st.warning("Same-name companies in different countries share one saved record in this version. The first country is used.")
+                st.success(f"Loaded {len(st.session_state['companies'])} unique company names.")
     except Exception as e:
         st.error(f"Cannot read file: {e}")
 
@@ -47,11 +52,7 @@ with st.expander("Search settings", expanded=True):
     st.info("For unattended processing, select 1500 and keep this local app running. Search providers may rate-limit or block automated queries; a successful lookup is not guaranteed. Progress is saved after every company. Start with 5–10 to confirm searching works.")
 
 if st.button("Find domains automatically", type="primary", disabled=not bool(companies)):
-    done = set(rows["company"].tolist()) if not rows.empty else set()
-    previous = {str(r.company): str(r.domain or "") for r in rows.itertuples(index=False)}
-    pending = [(company, country) for company, country in companies
-               if company not in done or (retry_unmatched and not previous.get(company))]
-    pending = pending[:batch]
+    pending = eligible_companies(companies, rows.fillna("").to_dict("records"), retry_unmatched)[:batch]
     if not pending:
         st.success("No eligible companies remain in this batch. Enable retry unmatched to research missing domains again.")
     else:
@@ -63,7 +64,6 @@ if st.button("Find domains automatically", type="primary", disabled=not bool(com
                 result = lookup(company, country, pause=pause)
             except Exception as e:
                 result = {"status": "review", "notes": f"Research error: {type(e).__name__}: {str(e)[:150]}"}
-            from scraper import write_result
             write_result(cx, company, result)
             progress.progress(i / len(pending))
         st.success(f"Finished {len(pending)} companies. Saved to local_data/domain_finder.sqlite3")
@@ -89,7 +89,7 @@ if not rows.empty:
                        (str(row["domain"] or ""), int(row["confidence"] or 0),
                         str(row["status"] or "review"), str(row["notes"] or ""), str(row["company"])))
         cx.commit()
-        st.success("Review changes saved.")
+        st.rerun()
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         rows.to_excel(writer, index=False, sheet_name="Domains")
