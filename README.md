@@ -1,4 +1,7 @@
-# bwc-domain-finder
+# BWC Domain Finder
+
+A company website research and review tool with a free local Python research mode and a static browser review interface.
+
 ## Free-source discovery upgrade (November 2026)
 - Wikidata entity searches in English and German, including simplified legal-name variants.
 - English and German Wikipedia article searches, resolved to Wikidata entity IDs.
