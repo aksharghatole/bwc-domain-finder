@@ -13,6 +13,52 @@ class DomainFinderTests(unittest.TestCase):
         self.assertEqual(scraper.domain_from("https://uk.linkedin.com/company/a"), "")
         self.assertEqual(scraper.domain_from("invalid"), "")
 
+    def test_rejects_invalid_and_nonweb_hosts(self):
+        for url in ("ftp://example.com", "https://user:pass@example.com",
+                    "http://127.0.0.1", "http://[::1]", "http://router.local",
+                    "https://bad_host.example", "https://192.168.0.1", None):
+            with self.subTest(url=url):
+                self.assertEqual(scraper.domain_from(url), "")
+
+    def test_cross_host_redirect_is_not_followed(self):
+        with patch.object(scraper.requests, "get") as get:
+            response = get.return_value.__enter__.return_value
+            response.status_code = 302
+            response.headers = {"Location": "https://unrelated.example/"}
+            title, evidence, error, final_url = scraper.site_evidence("https://acme.example")
+            self.assertEqual((title, evidence), ("", ""))
+            self.assertIn("Cross-host", error)
+            self.assertEqual(get.call_count, 1)
+
+    def test_same_host_redirect_and_final_evidence_url(self):
+        with patch.object(scraper.requests, "get") as get:
+            from unittest.mock import MagicMock
+            redirect = MagicMock()
+            redirect.__enter__.return_value.status_code = 301
+            redirect.__enter__.return_value.headers = {"Location": "https://www.acme.example/en"}
+            page = MagicMock()
+            response = page.__enter__.return_value
+            response.status_code = 200
+            response.headers = {"content-type": "text/html"}
+            response.iter_content.return_value = [b"<title>Acme</title><h1>Robotics</h1>"]
+            get.side_effect = [redirect, page]
+            title, evidence, error, final_url = scraper.site_evidence("http://acme.example")
+            self.assertEqual(title, "Acme")
+            self.assertIn("Robotics", evidence)
+            self.assertEqual(error, "")
+            self.assertEqual(final_url, "https://www.acme.example/en")
+            self.assertEqual(get.call_count, 2)
+            self.assertTrue(all(not call.kwargs["allow_redirects"] for call in get.call_args_list))
+
+    def test_redirect_loop_is_bounded(self):
+        with patch.object(scraper.requests, "get") as get:
+            response = get.return_value.__enter__.return_value
+            response.status_code = 302
+            response.headers = {"Location": "/loop"}
+            _, _, error, _ = scraper.site_evidence("https://acme.example")
+            self.assertIn("limit", error)
+            self.assertEqual(get.call_count, 5)
+
     def test_ambiguous_names(self):
         self.assertLess(scraper.name_fit("AGRO AG", "Danish Agro"), 0.9)
         self.assertGreater(scraper.name_fit("Acme Robotics GmbH", "Acme Robotics"), 0.9)
@@ -110,7 +156,7 @@ class DomainFinderTests(unittest.TestCase):
                     "search_source": "wikidata", "source_entity": "https://www.wikidata.org/wiki/Q1"}}
         with patch.object(scraper, "discover_search", return_value=({}, [])), \
              patch.object(scraper, "discover_wikidata", return_value=(candidate, [])), \
-             patch.object(scraper, "site_evidence", return_value=("", "", "Unavailable")), \
+             patch.object(scraper, "site_evidence", return_value=("", "", "Unavailable", "")), \
              patch.object(scraper.time, "sleep"):
             self.assertEqual(scraper.lookup("Acme")["domain"], "")
 
@@ -119,7 +165,7 @@ class DomainFinderTests(unittest.TestCase):
                     "search_source": "wikidata", "source_entity": "https://www.wikidata.org/wiki/Q1"}}
         with patch.object(scraper, "discover_search", return_value=({}, [])), \
              patch.object(scraper, "discover_wikidata", return_value=(candidate, [])), \
-             patch.object(scraper, "site_evidence", return_value=("Acme | Solutions", "Acme Solutions Worldwide", "")), \
+             patch.object(scraper, "site_evidence", return_value=("Acme | Solutions", "Acme Solutions Worldwide", "", "https://acme.example")), \
              patch.object(scraper.time, "sleep"):
             result = scraper.lookup("Acme")
             self.assertEqual(result["domain"], "acme.example")
