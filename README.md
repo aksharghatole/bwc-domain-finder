@@ -31,3 +31,11 @@ GitHub Pages hosts the static review tool only. Browser JavaScript cannot reliab
 
 ### Automatic multi-engine domain finding
 The local Streamlit app now tries DuckDuckGo, Bing and Google backends through the unofficial `ddgs` library, with a public Bing RSS fallback when possible. Results are checked against company homepage text. In the local interface choose **Find domains automatically** and a batch size up to 1500 to attempt the full imported list. Keep the local app process running. Results are saved after each company. Providers may rate-limit queries; don't assume every company will resolve. Existing data from the GitHub Pages site is separate and is not automatically imported into local SQLite.
+
+### Country-aware saved results (local app)
+
+The local database now identifies a company by its exact name and country (surrounding whitespace is ignored). Import a country column when researching companies with similar or identical names. Use consistent country spellings across imports.
+
+On first launch after upgrading, the existing database is migrated automatically in one SQLite transaction. Previous domains, evidence, confidence, review status and notes are retained; previous records have a blank country because the older database did not save it. Blank-country records remain separate from country-specific records. No country is inferred. Back up the local_data directory before upgrading, and avoid running older versions against the upgraded database.
+
+Country is included in the review table and CSV/XLSX exports. Automated retries cannot overwrite approved or rejected records.
