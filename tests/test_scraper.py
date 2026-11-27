@@ -80,6 +80,53 @@ class DomainFinderTests(unittest.TestCase):
                 finally:
                     cx.close()
 
+    def test_wikidata_filters_ambiguous_and_deprecated_claims(self):
+        with patch.object(scraper.requests, "get") as get:
+            get.return_value.json.side_effect = [
+                {"search": [
+                    {"id": "Q1", "label": "Acme Robotics"},
+                    {"id": "Q2", "label": "Other Robotics"},
+                ]},
+                {"entities": {"Q1": {"claims": {"P856": [
+                    {"rank": "deprecated", "mainsnak": {"datavalue": {"value": "https://old.example"}}},
+                    {"rank": "normal", "mainsnak": {"datavalue": {"value": "https://acme.example"}}},
+                    {"rank": "normal", "mainsnak": {"datavalue": {"value": "https://linkedin.com/acme"}}},
+                ]}}}},
+            ]
+            candidates, errors = scraper.discover_wikidata("Acme Robotics GmbH")
+            self.assertFalse(errors)
+            self.assertEqual(list(candidates), ["acme.example"])
+            self.assertEqual(candidates["acme.example"]["source_entity"], "https://www.wikidata.org/wiki/Q1")
+            self.assertEqual(get.call_args.kwargs["params"]["ids"], "Q1")
+
+    def test_wikidata_failure_is_nonfatal(self):
+        with patch.object(scraper.requests, "get", side_effect=scraper.requests.Timeout):
+            candidates, errors = scraper.discover_wikidata("Acme")
+            self.assertEqual(candidates, {})
+            self.assertIn("wikidata:", errors[0])
+
+    def test_structured_claim_requires_homepage_evidence(self):
+        candidate = {"acme.example": {"href": "https://acme.example", "title": "Acme",
+                    "search_source": "wikidata", "source_entity": "https://www.wikidata.org/wiki/Q1"}}
+        with patch.object(scraper, "discover_search", return_value=({}, [])), \
+             patch.object(scraper, "discover_wikidata", return_value=(candidate, [])), \
+             patch.object(scraper, "site_evidence", return_value=("", "", "Unavailable")), \
+             patch.object(scraper.time, "sleep"):
+            self.assertEqual(scraper.lookup("Acme")["domain"], "")
+
+    def test_title_match_is_capped_and_source_is_saved(self):
+        candidate = {"acme.example": {"href": "https://acme.example", "title": "Acme",
+                    "search_source": "wikidata", "source_entity": "https://www.wikidata.org/wiki/Q1"}}
+        with patch.object(scraper, "discover_search", return_value=({}, [])), \
+             patch.object(scraper, "discover_wikidata", return_value=(candidate, [])), \
+             patch.object(scraper, "site_evidence", return_value=("Acme | Solutions", "Acme Solutions Worldwide", "")), \
+             patch.object(scraper.time, "sleep"):
+            result = scraper.lookup("Acme")
+            self.assertEqual(result["domain"], "acme.example")
+            self.assertLessEqual(result["confidence"], 74)
+            self.assertEqual(result["status"], "review")
+            self.assertIn("https://www.wikidata.org/wiki/Q1", result["notes"])
+
     def test_search_includes_country_without_legal_suffix(self):
         with patch.object(scraper, "DDGS") as ddgs:
             client = ddgs.return_value.__enter__.return_value

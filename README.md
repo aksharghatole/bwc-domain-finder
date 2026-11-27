@@ -39,3 +39,7 @@ The local database now identifies a company by its exact name and country (surro
 On first launch after upgrading, the existing database is migrated automatically in one SQLite transaction. Previous domains, evidence, confidence, review status and notes are retained; previous records have a blank country because the older database did not save it. Blank-country records remain separate from country-specific records. No country is inferred. Back up the local_data directory before upgrading, and avoid running older versions against the upgraded database.
 
 Country is included in the review table and CSV/XLSX exports. Automated retries cannot overwrite approved or rejected records.
+
+### Local Wikidata discovery
+
+The local Python scraper also queries Wikidata's public entity API for official website (P856) claims with closely matching names. These are additional candidates, not proof of ownership: the app still evaluates homepage evidence and flags competing domains. Entity links are recorded in notes. The structured lookup uses English labels and aliases, does not independently verify country, and may miss small companies or fail under provider throttling. Keep batch sizes modest and manually review results.

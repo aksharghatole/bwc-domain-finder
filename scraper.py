@@ -158,6 +158,56 @@ def discover_search(company, country="", max_results=6, pause=2.0):
     return candidates, errors
 
 
+def discover_wikidata(company, max_results=4):
+    """Retrieve official-website (P856) candidates for closely named entities."""
+    endpoint = "https://www.wikidata.org/w/api.php"
+    candidates = {}
+    errors = []
+    try:
+        response = requests.get(endpoint, params={
+            "action": "wbsearchentities", "search": company, "language": "en",
+            "type": "item", "limit": 8, "format": "json",
+        }, headers=HEADERS, timeout=(5, 12))
+        response.raise_for_status()
+        payload = response.json()
+        if "error" in payload:
+            raise ValueError("Wikidata search API error")
+        matches = [item for item in payload.get("search", [])
+                   if re.fullmatch(r"Q[1-9][0-9]*", item.get("id", ""))
+                   and max([name_fit(company, item.get("label", ""))]
+                           + [name_fit(company, alias) for alias in item.get("aliases", [])]) >= 0.85]
+        if not matches:
+            return candidates, errors
+        response = requests.get(endpoint, params={
+            "action": "wbgetentities", "ids": "|".join(item["id"] for item in matches),
+            "props": "claims", "format": "json",
+        }, headers=HEADERS, timeout=(5, 12))
+        response.raise_for_status()
+        payload = response.json()
+        if "error" in payload:
+            raise ValueError("Wikidata entity API error")
+        for item in matches:
+            entity = payload.get("entities", {}).get(item["id"], {})
+            for claim in entity.get("claims", {}).get("P856", []):
+                if claim.get("rank") == "deprecated":
+                    continue
+                url = claim.get("mainsnak", {}).get("datavalue", {}).get("value")
+                if not isinstance(url, str) or not url.startswith(("https://", "http://")):
+                    continue
+                dom = domain_from(url)
+                if not dom:
+                    continue
+                candidates.setdefault(dom, {
+                    "href": url, "title": item.get("label", ""), "body": item.get("description", ""),
+                    "search_source": "wikidata", "source_entity": "https://www.wikidata.org/wiki/" + item["id"],
+                })
+                if len(candidates) >= max_results:
+                    return candidates, errors
+    except (requests.RequestException, ValueError, TypeError, AttributeError) as exc:
+        errors.append(f"wikidata: {type(exc).__name__} {str(exc)[:80]}")
+    return candidates, errors
+
+
 def site_evidence(url):
     """Inspect only one landing page. Do not bypass access restrictions."""
     try:
@@ -177,13 +227,23 @@ def site_evidence(url):
 def lookup(company, country="", max_results=6, pause=2.0):
     """Discover candidate domains and check whether site content supports ownership."""
     candidates, errors = discover_search(company, country, max_results, pause)
+    structured, structured_errors = discover_wikidata(company)
+    errors.extend(structured_errors)
+    # Evaluate structured candidates first, while keeping search results for comparison.
+    for dom, candidate in candidates.items():
+        structured.setdefault(dom, candidate)
+    candidates = structured
     scored = []
     for dom, result in list(candidates.items())[:max_results + 4]:
         url = result.get("href", "")
         title, evidence, err = site_evidence(url)
         search_title = result.get("title", "")
         search_snippet = result.get("body", "")
-        company_score = name_fit(company, evidence)
+        # Titles often contain an exact brand followed by a marketing tagline.
+        # A title alone is weaker than full-page evidence, so cap its contribution.
+        title_parts = re.split(r"\s+[|–—-]\s+|\s*\|\s*", title)
+        title_score = max((name_fit(company, part) for part in title_parts), default=0)
+        company_score = max(name_fit(company, evidence), min(0.78, title_score))
         search_score = max(name_fit(company, search_title), name_fit(company, search_snippet))
         # Pages may be unrelated despite matching name fragments.
         if company_score >= 0.85:
@@ -201,7 +261,8 @@ def lookup(company, country="", max_results=6, pause=2.0):
             "evidence_url": url, "evidence_title": title or search_title,
             "matched_name": search_title,
             "notes": f"Search: {result.get('search_source', 'unknown')}. "
-                     + (err or "Compared website title, meta description and headings"),
+                     + (err or "Compared website title, meta description and headings")
+                     + (f"; entity: {result['source_entity']}" if result.get("source_entity") else ""),
         })
         time.sleep(max(0.5, pause / 2))
 
