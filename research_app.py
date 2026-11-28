@@ -3,7 +3,7 @@ import io
 import sqlite3
 import pandas as pd
 import streamlit as st
-from scraper import connect, lookup, eligible_companies, write_result, company_key, all_providers_wait, provider_wait, PROVIDERS
+from scraper import connect, lookup, eligible_companies, write_result, company_key, all_providers_wait, provider_wait, PROVIDERS, clear_research_cache
 
 st.set_page_config(page_title="BWC Domain Finder — Research", page_icon="🔎", layout="wide")
 st.title("BWC Domain Finder — Automated Research")
@@ -44,6 +44,11 @@ with st.expander("Search settings", expanded=True):
     batch = st.select_slider("Companies per run", options=[5, 10, 25, 50, 100, 250, 500, 1500], value=10)
     pause = st.slider("Delay between search requests (seconds)", 1.5, 8.0, 3.0, 0.5)
     retry_unmatched = st.checkbox("Retry researched companies without a domain", value=False)
+    refresh_cache = st.checkbox("Force fresh research (ignore cache)", value=False)
+    st.caption("Successful discovery and homepage evidence are cached locally for up to 24 hours. Retrying unmatched companies always uses fresh research.")
+    if st.button("Clear research cache"):
+        clear_research_cache(cx)
+        st.success("Research cache cleared. Saved company results were not changed.")
     st.info("For unattended processing, select 1500 and keep this local app running. Search providers may rate-limit or block automated queries; a successful lookup is not guaranteed. Progress is saved after every company. Start with 5–10 to confirm searching works.")
 
 cooling = [(provider, provider_wait(provider)) for provider in PROVIDERS]
@@ -67,7 +72,7 @@ if st.button("Find domains automatically", type="primary", disabled=not bool(com
                 break
             status.write(f"Researching {i}/{len(pending)}: **{company}** ({country or 'country unspecified'})")
             try:
-                result = lookup(company, country, pause=pause)
+                result = lookup(company, country, pause=pause, cx=cx, refresh=refresh_cache or retry_unmatched)
             except Exception as e:
                 result = {"status": "review", "notes": f"Research error: {type(e).__name__}: {str(e)[:150]}"}
             if not result.get("domain") and all_providers_wait():

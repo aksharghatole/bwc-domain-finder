@@ -53,3 +53,9 @@ The local scraper now follows at most four redirects before reading the final re
 The local app temporarily skips providers reporting throttling (including HTTP 429/403 or explicit CAPTCHA/rate-limit errors) for at least five minutes, and applies a one-minute cooldown for timeouts or HTTP 503. A longer HTTP Retry-After instruction takes precedence. Bing and Bing RSS share a cooldown; the app does not use RSS to circumvent a Bing limit.
 
 When all providers are cooling down, the batch stops, saves completed results and leaves unfinished companies eligible for a later run. The interface shows the cooldown and the earliest available retry time. Restarting the local Python process clears these in-memory cooldowns; do not restart to circumvent provider restrictions. This is not a guarantee that every upstream provider exposes its throttling signal through ddgs.
+
+### Persistent research cache
+
+The local app stores successful, nonempty search candidate sets and successful homepage evidence in SQLite for 24 hours. Candidate sets are keyed by exact company name, country and result limit; homepage evidence is keyed by exact URL. Failed or empty discoveries and failed website requests are not cached. Cached evidence is labeled in result notes, and all candidates still require manual review.
+
+Use **Force fresh research (ignore cache)** for a new lookup, or **Clear research cache** to remove cached data without deleting saved results. Retrying unmatched companies always bypasses the cache. Expired cache entries are removed when the database is opened. The cache is local to your PC; it does not change provider cooldown behavior.
