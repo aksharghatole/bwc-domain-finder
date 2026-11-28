@@ -3,7 +3,7 @@ import io
 import sqlite3
 import pandas as pd
 import streamlit as st
-from scraper import connect, lookup, eligible_companies, write_result, company_key
+from scraper import connect, lookup, eligible_companies, write_result, company_key, all_providers_wait, provider_wait, PROVIDERS
 
 st.set_page_config(page_title="BWC Domain Finder — Research", page_icon="🔎", layout="wide")
 st.title("BWC Domain Finder — Automated Research")
@@ -46,6 +46,12 @@ with st.expander("Search settings", expanded=True):
     retry_unmatched = st.checkbox("Retry researched companies without a domain", value=False)
     st.info("For unattended processing, select 1500 and keep this local app running. Search providers may rate-limit or block automated queries; a successful lookup is not guaranteed. Progress is saved after every company. Start with 5–10 to confirm searching works.")
 
+cooling = [(provider, provider_wait(provider)) for provider in PROVIDERS]
+cooling = [(provider, seconds) for provider, seconds in cooling if seconds]
+if cooling:
+    st.warning("Search cooldowns: " + ", ".join(f"{provider}: {seconds}s" for provider, seconds in cooling)
+               + ". Providers are skipped until their cooldown expires. Rerun the app to refresh this display.")
+
 if st.button("Find domains automatically", type="primary", disabled=not bool(companies)):
     pending = eligible_companies(companies, rows.fillna("").to_dict("records"), retry_unmatched)[:batch]
     if not pending:
@@ -53,16 +59,31 @@ if st.button("Find domains automatically", type="primary", disabled=not bool(com
     else:
         progress = st.progress(0)
         status = st.empty()
+        completed = 0
+        paused = False
         for i, (company, country) in enumerate(pending, 1):
+            if all_providers_wait():
+                paused = True
+                break
             status.write(f"Researching {i}/{len(pending)}: **{company}** ({country or 'country unspecified'})")
             try:
                 result = lookup(company, country, pause=pause)
             except Exception as e:
                 result = {"status": "review", "notes": f"Research error: {type(e).__name__}: {str(e)[:150]}"}
+            if not result.get("domain") and all_providers_wait():
+                # A provider outage is not evidence that a company lacks a domain.
+                paused = True
+                break
             write_result(cx, company, result, country=country)
-            progress.progress(i / len(pending))
-        st.success(f"Finished {len(pending)} companies. Saved to local_data/domain_finder.sqlite3")
-        st.rerun()
+            completed += 1
+            progress.progress(completed / len(pending))
+        if paused:
+            status.warning(f"Paused after saving {completed} of {len(pending)} companies. "
+                           f"All search providers are cooling down. Retry in {all_providers_wait()} seconds; "
+                           "unfinished companies remain eligible.")
+        else:
+            st.success(f"Finished {completed} companies. Saved to local_data/domain_finder.sqlite3")
+            st.rerun()
 
 st.subheader("Saved research")
 rows = pd.read_sql_query("SELECT * FROM results ORDER BY company, country", cx)
