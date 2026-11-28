@@ -5,6 +5,7 @@ import sqlite3
 import random
 import ipaddress
 import math
+import json
 from email.utils import parsedate_to_datetime
 from datetime import datetime, timezone
 from urllib.parse import urlparse, urljoin
@@ -108,6 +109,10 @@ def connect():
                 cx.execute("DROP TABLE results_legacy")
             else:
                 _create_results(cx)
+            cx.execute('''CREATE TABLE IF NOT EXISTS research_cache(
+                cache_key TEXT PRIMARY KEY, payload TEXT NOT NULL, expires_at REAL NOT NULL
+            )''')
+            cx.execute("DELETE FROM research_cache WHERE expires_at <= ?", (time.time(),))
         return cx
     except Exception:
         cx.close()
@@ -320,20 +325,83 @@ def site_evidence(url):
         return "", "", type(e).__name__, current
 
 
-def lookup(company, country="", max_results=6, pause=2.0):
-    """Discover candidate domains and check whether site content supports ownership."""
+CACHE_TTL = 24 * 60 * 60
+CACHE_VERSION = 1
+
+
+def cache_key(kind, *parts):
+    return json.dumps([CACHE_VERSION, kind, *parts], ensure_ascii=False)
+
+
+def cache_get(cx, key):
+    if cx is None:
+        return None
+    row = cx.execute("SELECT payload FROM research_cache WHERE cache_key=? AND expires_at>?",
+                     (key, time.time())).fetchone()
+    if row:
+        try:
+            return json.loads(row[0])
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
+def cache_put(cx, key, payload):
+    if cx is None:
+        return
+    with cx:
+        cx.execute("""INSERT INTO research_cache(cache_key, payload, expires_at) VALUES (?,?,?)
+                   ON CONFLICT(cache_key) DO UPDATE SET payload=excluded.payload,
+                       expires_at=excluded.expires_at""",
+                   (key, json.dumps(payload, ensure_ascii=False), time.time() + CACHE_TTL))
+
+
+def clear_research_cache(cx):
+    with cx:
+        cx.execute("DELETE FROM research_cache")
+
+
+def discover_candidates(company, country, max_results, pause, cx=None, refresh=False):
+    """Reuse only nonempty, error-free discovery results; never cache outages."""
+    key = cache_key("candidates", *company_key(company, country), max_results)
+    if not refresh:
+        cached = cache_get(cx, key)
+        if isinstance(cached, dict) and cached:
+            return cached, [], True
     candidates, errors = discover_search(company, country, max_results, pause)
     structured, structured_errors = discover_wikidata(company)
     errors.extend(structured_errors)
-    # Evaluate structured candidates first, while keeping search results for comparison.
     for dom, candidate in candidates.items():
         structured.setdefault(dom, candidate)
-    candidates = structured
+    if structured and not errors:
+        # Persist only fields used by the scorer, not arbitrary upstream metadata.
+        clean = {dom: {field: str(item.get(field) or "") for field in
+                       ("href", "title", "body", "search_source", "source_entity")}
+                 for dom, item in structured.items()}
+        cache_put(cx, key, clean)
+    return structured, errors, False
+
+
+def cached_site_evidence(url, cx=None, refresh=False):
+    key = cache_key("homepage", url)
+    if not refresh:
+        cached = cache_get(cx, key)
+        if isinstance(cached, list) and len(cached) == 4:
+            return tuple(cached), True
+    result = site_evidence(url)
+    if not result[2] and result[1]:
+        cache_put(cx, key, result)
+    return result, False
+
+
+def lookup(company, country="", max_results=6, pause=2.0, cx=None, refresh=False):
+    """Discover candidate domains and check whether site content supports ownership."""
+    candidates, errors, cached_discovery = discover_candidates(company, country, max_results, pause, cx, refresh)
     scored = []
     site_errors = []
     for dom, result in list(candidates.items())[:max_results + 4]:
         url = result.get("href", "")
-        title, evidence, err, final_url = site_evidence(url)
+        (title, evidence, err, final_url), cached_homepage = cached_site_evidence(url, cx, refresh)
         if err:
             site_errors.append(f"{dom}: {err}")
         search_title = result.get("title", "")
@@ -363,7 +431,10 @@ def lookup(company, country="", max_results=6, pause=2.0):
                      + (err or "Compared website title, meta description and headings")
                      + (f"; entity: {result['source_entity']}" if result.get("source_entity") else ""),
         })
-        time.sleep(max(0.5, pause / 2))
+        if cached_homepage:
+            scored[-1]["notes"] += "; cached homepage evidence (up to 24h old)"
+        else:
+            time.sleep(max(0.5, pause / 2))
 
     scored.sort(key=lambda row: row["confidence"], reverse=True)
     if not scored or scored[0]["confidence"] < 40:
@@ -378,6 +449,8 @@ def lookup(company, country="", max_results=6, pause=2.0):
         best["confidence"] = min(best["confidence"], 60)
         best["notes"] += "; competing plausible domains"
     best["status"] = "review"
+    if cached_discovery:
+        best["notes"] += "; cached discovery (up to 24h old)"
     if errors:
         best["notes"] += "; some search sources unavailable: " + "; ".join(errors[:2])
     if site_errors:
